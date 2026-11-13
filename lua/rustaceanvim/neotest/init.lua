@@ -87,15 +87,14 @@ end
 
 ---@package
 ---@param file_path string
----@return neotest.Tree
+---@return neotest.Tree|nil
 NeotestAdapter.discover_positions = function(file_path)
   ---@type rustaceanvim.neotest.Position[]
   local positions = {}
 
   local lsp_client = require('rustaceanvim.rust_analyzer').get_client_for_file(file_path, 'experimental/runnables')
   if not lsp_client then
-    ---@diagnostic disable-next-line: missing-parameter
-    return lib.positions.parse_tree(positions)
+    return nil
   end
   local nio_client = nio.lsp.get_client_by_id(lsp_client.id)
   ---@cast nio_client nio.rustaceanvim.Client
@@ -111,8 +110,7 @@ NeotestAdapter.discover_positions = function(file_path)
   })
 
   if err or type(runnables) ~= 'table' or #runnables == 0 then
-    ---@diagnostic disable-next-line: missing-parameter
-    return lib.positions.parse_tree(positions)
+    return nil
   end
 
   local max_end_row = 0
@@ -243,6 +241,7 @@ end
 ---@field pos_id string
 ---@field type neotest.PositionType
 ---@field tree neotest.Tree
+---@field results_path? string Stable libtest logfile, independent of merged terminal output.
 
 ---@package
 ---@param run_args neotest.RunArgs
@@ -270,6 +269,9 @@ function NeotestAdapter.build_spec(run_args)
     tree = tree,
   }
   local exe, args, cwd, env = require('rustaceanvim.runnables').get_command(runnable)
+  if args[1] == 'test' or run_args.strategy == 'dap' then
+    context.results_path = nio.fn.tempname()
+  end
   if run_args.strategy == 'dap' then
     local dap = require('rustaceanvim.dap')
     overrides.sanitize_command_for_debugging(runnable.args.cargoArgs)
@@ -282,10 +284,15 @@ function NeotestAdapter.build_spec(run_args)
     end)
     local ok, strategy = pcall(future.wait)
     if not ok then
-      ---@cast strategy string
-      lib.notify(strategy, vim.log.levels.ERROR)
+      error(strategy)
     end
     ---@cast strategy rustaceanvim.dap.client.Config
+    strategy.args = vim.deepcopy(strategy.args or {})
+    vim.list_extend(strategy.args, { '--logfile', context.results_path })
+    if strategy.type == 'codelldb' then
+      -- Neotest consumes DAP stdout/stderr events, not a runInTerminal PTY.
+      strategy.terminal = 'console'
+    end
     ---@type rustaceanvim.neotest.RunSpec
     ---@diagnostic disable-next-line
     local run_spec = {
@@ -303,6 +310,7 @@ function NeotestAdapter.build_spec(run_args)
   if is_cargo_test then
     -- cargo test needs to pass --color=never to the test runner too
     table.insert(args, '--color=never')
+    vim.list_extend(args, { '--logfile', context.results_path })
   else
     table.insert(args, 2, '--color')
     table.insert(args, 3, 'never')
@@ -319,20 +327,6 @@ function NeotestAdapter.build_spec(run_args)
 end
 
 ---@package
----Get the file root from a test tree.
----@param tree neotest.Tree The test tree.
----@return neotest.Tree file_root The file root position.
-local function get_file_root(tree)
-  for _, node in tree:iter_parents() do
-    local data = node and node:data()
-    if data and not vim.tbl_contains({ 'test', 'namespace' }, data.type) then
-      return node
-    end
-  end
-  return tree
-end
-
----@package
 ---@param spec neotest.RunSpec
 ---@param strategy_result neotest.StrategyResult
 ---@return table<string, neotest.Result> results
@@ -344,16 +338,41 @@ function NeotestAdapter.results(spec, strategy_result)
   local ctx_pos_id = context.pos_id
   ---@type string
   local output_content = lib.files.read(strategy_result.output)
-  if strategy_result.code == 0 then
-    results[ctx_pos_id] = {
-      status = 'passed',
-      output = strategy_result.output,
-    }
-    return results
+  output_content = output_content:gsub('\r\n', '\n')
+  local parser = require('rustaceanvim.neotest.parser')
+  local parsed
+  if context.results_path then
+    local ok, report = pcall(lib.files.read, context.results_path)
+    if not ok then
+      for _, node in context.tree:iter_nodes() do
+        results[node:data().id] = {
+          status = 'failed',
+          output = strategy_result.output,
+          errors = { { message = 'Rust test result logfile unavailable: ' .. context.results_path } },
+        }
+      end
+      return results
+    end
+    parsed = parser.populate_logfile_results({}, context, report)
+    pcall(nio.uv.fs_unlink, context.results_path)
+  else
+    parsed = parser.populate_results({}, context, output_content)
   end
+  local status = strategy_result.code == 0 and 'skipped' or 'failed'
+  if strategy_result.code == 0 then
+    for _, result in pairs(parsed) do
+      if result.status == 'passed' then
+        status = 'passed'
+        break
+      end
+    end
+  end
+  results[ctx_pos_id] = {
+    status = status,
+    output = strategy_result.output,
+  }
   ---@type table<string,neotest.Error[]>
   local errors_by_test_id = {}
-  output_content = output_content:gsub('\r\n', '\n')
   local diagnostics = require('rustaceanvim.test').parse_diagnostics(context.file, output_content, 0)
   for _, diagnostic in pairs(diagnostics) do
     ---@type neotest.Error
@@ -364,33 +383,14 @@ function NeotestAdapter.results(spec, strategy_result)
     errors_by_test_id[diagnostic.test_id] = errors_by_test_id[diagnostic.test_id] or {}
     table.insert(errors_by_test_id[diagnostic.test_id], err)
   end
-  if not vim.tbl_contains({ 'file', 'test', 'namespace' }, context.type) then
-    return results
-  end
-  results[ctx_pos_id] = {
-    status = 'failed',
-    output = strategy_result.output,
-  }
-  local has_failures = not vim.tbl_isempty(diagnostics)
-  for _, node in get_file_root(context.tree):iter_nodes() do
+  for _, node in context.tree:iter_nodes() do
     local data = node:data()
-    for test_id, errors in pairs(errors_by_test_id) do
-      if vim.endswith(data.id, test_id) then
-        results[data.id] = {
-          status = 'failed',
-          errors = errors,
-          short = output_content,
-        }
-      elseif has_failures and data.type == 'test' then
-        -- Initialise as skipped. Passed positions will be parsed and set later.
-        results[data.id] = {
-          status = 'skipped',
-        }
-      end
+    local result = parsed[data.id]
+    if result then
+      result.output = strategy_result.output
+      result.errors = errors_by_test_id[data.id:sub(#data.path + 3)]
+      results[data.id] = result
     end
-  end
-  if has_failures then
-    require('rustaceanvim.neotest.parser').populate_pass_positions(results, context, output_content)
   end
   return results
 end
