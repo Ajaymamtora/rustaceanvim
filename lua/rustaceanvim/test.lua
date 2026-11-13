@@ -12,7 +12,7 @@ M.parse_diagnostics = function(file_name, output, bufnr)
   local diagnostics = {}
   for i, line in ipairs(lines) do
     local message = ''
-    local test_id, file, lnum, col = line:match("thread '([^']+)' panicked at ([^:]+):(%d+):(%d+):")
+    local test_id, file, lnum, col = line:match("thread '([^']+)'%s+.-panicked at ([^:]+):(%d+):(%d+):")
     if lnum and col and message and vim.endswith(file_name, file) then
       local next_i = i + 1
       while #lines >= next_i and lines[next_i] ~= '' do

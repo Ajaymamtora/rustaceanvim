@@ -39,6 +39,20 @@ note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
     }
     assert.are.same(expected, diagnostics)
   end)
+  it('Rust output with a thread identifier', function()
+    local output = [[
+thread 'tests::fails' (30028241) panicked at member/src/lib.rs:18:9:
+assertion `left == right` failed
+  left: 5
+ right: 6
+]]
+    local diagnostics = test.parse_diagnostics('/workspace/member/src/lib.rs', output, 0)
+    assert.are.equal(1, #diagnostics)
+    assert.are.equal('tests::fails', diagnostics[1].test_id)
+    assert.are.equal(17, diagnostics[1].lnum)
+    assert.are.equal(9, diagnostics[1].col)
+    assert.matches('left: 5', diagnostics[1].message)
+  end)
   it('Legacy output', function()
     local fixture = [[
 test tests::failed_math ... FAILED"

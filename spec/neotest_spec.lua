@@ -85,5 +85,35 @@ error: test run failed
 ]]
       run_golden_test(fixture)
     end)
+    it('reports libtest outcomes even without panic diagnostics', function()
+      local output = [[
+test tests::passes ... ok
+test tests::fails ... FAILED
+test tests::ignored ... ignored, acceptance ignored
+test tests::expected_panic - should panic ... ok
+]]
+      local results = parser.populate_results({}, { file = 'lib.rs' }, output)
+      assert.same({
+        ['lib.rs::tests::passes'] = { status = 'passed' },
+        ['lib.rs::tests::fails'] = { status = 'failed' },
+        ['lib.rs::tests::ignored'] = { status = 'skipped' },
+        ['lib.rs::tests::expected_panic'] = { status = 'passed' },
+      }, results)
+    end)
+    it('reports nextest outcomes, including skipped tests', function()
+      local output = [[
+        PASS [   0.003s] member tests::passes
+        FAIL [   0.003s] member tests::fails
+        SKIP [   0.003s] member tests::ignored
+]]
+      assert.same({
+        ['lib.rs::tests::passes'] = { status = 'passed' },
+        ['lib.rs::tests::fails'] = { status = 'failed' },
+        ['lib.rs::tests::ignored'] = { status = 'skipped' },
+      }, parser.populate_results({}, { file = 'lib.rs' }, output))
+    end)
+    it('does not invent a passing test from a successful empty run', function()
+      assert.same({}, parser.populate_results({}, { file = 'lib.rs' }, 'running 0 tests\ntest result: ok.'))
+    end)
   end)
 end)

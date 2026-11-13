@@ -36,4 +36,25 @@ function M.populate_pass_positions(results, context, output_content)
   return results
 end
 
+---Populate authoritative libtest/cargo-nextest outcomes, including ignored tests.
+---@param results table<string, neotest.Result>
+---@param context rustaceanvim.neotest.RunContext
+---@param output_content string
+---@return table<string, neotest.Result>
+function M.populate_results(results, context, output_content)
+  local statuses =
+    { ok = 'passed', FAILED = 'failed', ignored = 'skipped', PASS = 'passed', FAIL = 'failed', SKIP = 'skipped' }
+  for line in output_content:gmatch('[^\r\n]+') do
+    local name, outcome = line:match('^test%s+(%S+)%s+.-%.%.%.%s+(%w+)')
+    if not name then
+      outcome, name = line:match('^%s*(%u+)%s+%b[]%s+%S+%s+(%S+)%s*$')
+    end
+    local status = statuses[outcome]
+    if name and status then
+      results[trans.get_position_id(context.file, name)] = { status = status }
+    end
+  end
+  return results
+end
+
 return M
