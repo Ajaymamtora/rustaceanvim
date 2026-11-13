@@ -241,6 +241,7 @@ end
 ---@field pos_id string
 ---@field type neotest.PositionType
 ---@field tree neotest.Tree
+---@field results_path? string Stable libtest logfile, independent of merged terminal output.
 
 ---@package
 ---@param run_args neotest.RunArgs
@@ -268,6 +269,9 @@ function NeotestAdapter.build_spec(run_args)
     tree = tree,
   }
   local exe, args, cwd, env = require('rustaceanvim.runnables').get_command(runnable)
+  if args[1] == 'test' or run_args.strategy == 'dap' then
+    context.results_path = nio.fn.tempname()
+  end
   if run_args.strategy == 'dap' then
     local dap = require('rustaceanvim.dap')
     overrides.sanitize_command_for_debugging(runnable.args.cargoArgs)
@@ -283,6 +287,8 @@ function NeotestAdapter.build_spec(run_args)
       error(strategy)
     end
     ---@cast strategy rustaceanvim.dap.client.Config
+    strategy.args = vim.deepcopy(strategy.args or {})
+    vim.list_extend(strategy.args, { '--logfile', context.results_path })
     if strategy.type == 'codelldb' then
       -- Neotest consumes DAP stdout/stderr events, not a runInTerminal PTY.
       strategy.terminal = 'console'
@@ -304,6 +310,7 @@ function NeotestAdapter.build_spec(run_args)
   if is_cargo_test then
     -- cargo test needs to pass --color=never to the test runner too
     table.insert(args, '--color=never')
+    vim.list_extend(args, { '--logfile', context.results_path })
   else
     table.insert(args, 2, '--color')
     table.insert(args, 3, 'never')
@@ -332,7 +339,25 @@ function NeotestAdapter.results(spec, strategy_result)
   ---@type string
   local output_content = lib.files.read(strategy_result.output)
   output_content = output_content:gsub('\r\n', '\n')
-  local parsed = require('rustaceanvim.neotest.parser').populate_results({}, context, output_content)
+  local parser = require('rustaceanvim.neotest.parser')
+  local parsed
+  if context.results_path then
+    local ok, report = pcall(lib.files.read, context.results_path)
+    if not ok then
+      for _, node in context.tree:iter_nodes() do
+        results[node:data().id] = {
+          status = 'failed',
+          output = strategy_result.output,
+          errors = { { message = 'Rust test result logfile unavailable: ' .. context.results_path } },
+        }
+      end
+      return results
+    end
+    parsed = parser.populate_logfile_results({}, context, report)
+    pcall(nio.uv.fs_unlink, context.results_path)
+  else
+    parsed = parser.populate_results({}, context, output_content)
+  end
   local status = strategy_result.code == 0 and 'skipped' or 'failed'
   if strategy_result.code == 0 then
     for _, result in pairs(parsed) do

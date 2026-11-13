@@ -57,4 +57,25 @@ function M.populate_results(results, context, output_content)
   return results
 end
 
+---Read libtest's stable logfile rather than interleaved stdout/stderr.
+---@param results table<string, neotest.Result>
+---@param context rustaceanvim.neotest.RunContext
+---@param content string
+---@return table<string, neotest.Result>
+function M.populate_logfile_results(results, context, content)
+  local statuses = { ok = 'passed', failed = 'failed', ignored = 'skipped' }
+  for line in content:gmatch('[^\r\n]+') do
+    local outcome, name = line:match('^(%l+)%s+(%S+)$')
+    if not name then
+      name = line:match('^ignored:.*%s(%S+)$')
+      outcome = name and 'ignored' or nil
+    end
+    local status = statuses[outcome]
+    if name and status then
+      results[trans.get_position_id(context.file, name)] = { status = status }
+    end
+  end
+  return results
+end
+
 return M

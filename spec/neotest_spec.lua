@@ -115,5 +115,22 @@ test tests::expected_panic - should panic ... ok
     it('does not invent a passing test from a successful empty run', function()
       assert.same({}, parser.populate_results({}, { file = 'lib.rs' }, 'running 0 tests\ntest result: ok.'))
     end)
+    it('reads authoritative libtest logfiles with optional ignore reasons', function()
+      local logfile = [[
+ignored: acceptance ignored tests::ignored_with_reason
+ignored tests::ignored
+ok tests::passes
+failed tests::fails
+]]
+      assert.same({
+        ['lib.rs::tests::ignored_with_reason'] = { status = 'skipped' },
+        ['lib.rs::tests::ignored'] = { status = 'skipped' },
+        ['lib.rs::tests::passes'] = { status = 'passed' },
+        ['lib.rs::tests::fails'] = { status = 'failed' },
+      }, parser.populate_logfile_results({}, { file = 'lib.rs' }, logfile))
+    end)
+    it('does not accept console fragments as libtest logfile results', function()
+      assert.same({}, parser.populate_logfile_results({}, { file = 'lib.rs' }, 'ok\nignored, reason\ntest foo ... '))
+    end)
   end)
 end)
